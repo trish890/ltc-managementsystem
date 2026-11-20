@@ -142,6 +142,7 @@ main,nav,header{position:relative;z-index:1}
 .lcard h2{color:#0b1f5c;font-size:22px;margin:0 0 4px}.lcard p{margin:0 0 16px;color:#667090;font-size:13px}
 .lcard form{grid-template-columns:1fr}.lcard input{background:#f4f6fb;color:#14214d}.lcard .btn{width:100%}
 #lmsg{color:#c8102e;font-size:13px;min-height:20px;margin-top:8px}
+.connection{margin:14px 0;padding:12px 14px;border-left:3px solid #f5b800;background:#f4f6fb;font-size:12px;line-height:1.6;color:#14214d}.connection[data-failed="true"]{border-color:#c8102e}.connection a{color:#0b1f5c;font-weight:600}
 @media(max-width:800px){#login{grid-template-columns:1fr}#login .art{max-width:340px}}
 .pw{position:relative;display:block}.pw input{padding-right:42px}.eye{position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:0;color:#667090;cursor:pointer;padding:6px;border-radius:6px;display:grid;place-items:center}.eye:hover{color:#0b1f5c}.eye:focus-visible{outline:3px solid #f5b800}
 </style>
@@ -159,6 +160,7 @@ main,nav,header{position:relative;z-index:1}
 <footer>LTFRB 24/7 Hotline: 1342 · 0917-550-1342 / 0998-550-1342 · Shared, encrypted company data</footer>
 <section id="login"><div class="art" role="img" aria-label="Luwas Transport Corp bus"></div>
 <div class="lcard"><h2>Sign in</h2><p>Use the same username and password on this Netlify link in Edge, Chrome, Brave or Firefox.</p>
+<div class="connection" role="status" aria-live="polite"><span id="connection-status">Checking shared account storage…</span><br><a href="https://ltc-managementsystem-7hu3.netlify.app/" target="_blank" rel="noopener">Open the shared website</a></div>
 <form onsubmit="doLogin(event)" autocomplete="on"><label>Username<input name="u" required autocomplete="username" autocapitalize="none" spellcheck="false"></label>
 <label>Password<span class="pw"><input name="p" type="password" required autocomplete="current-password"><button type="button" class="eye" aria-label="Show password" aria-pressed="false" onclick="togglePw(this)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/><path class="slash" d="M3 3l18 18" style="display:none"/></svg></button></span></label><button class="btn">Sign in</button></form><div id="lmsg" role="alert"></div><p style="color:#667090;font-size:12px;margin:12px 0 0">Forgot your password? Ask your administrator to reset it.</p></div></section>
 <script>
@@ -203,7 +205,7 @@ d.trips.forEach((t,i)=>{if(!t.tid)t.tid='TRP-'+String(i+1).padStart(4,'0');t.tim
 d.fin.forEach(f=>{if(f.cat==='Tolls & Terminal')f.cat='Terminal Fees'});d.buses.forEach(b=>{b.reg=b.reg||'';b.next=b.next||''});d.drivers.forEach(x=>x.licExp=x.licExp||'');return d}
 /* ---------- security / storage ---------- */
 let db=null,CK=null,AUTH_TOKEN=null,REMOTE_PROFILES=null,REMOTE_REVISION=null,saveQueue=Promise.resolve(),SAVE_ERROR=null,ACCOUNT_BUSY=false,PENDING_SAVES=0;
-const API='/api/shared-store',LOCAL_ONLY=location.protocol==='file:';
+const API=location.protocol==='file:'?'https://ltc-managementsystem-7hu3.netlify.app/api/shared-store':'/api/shared-store';
 const VER="e05f87b8ef2ef132283d94338331352fa5b8cb0402e00b865caceccf88fefbc8";const TE=new TextEncoder();
 // Browser storage is an optional cache. The shared service remains authoritative.
 const browserCache=new Map();
@@ -212,6 +214,7 @@ function writeCache(key,value,session=false){value=String(value);browserCache.se
 function removeCache(key){browserCache.delete('local:'+key);try{window.localStorage.removeItem(key)}catch(e){}}
 const b64=a=>btoa(String.fromCharCode(...a)),unb=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
 async function apiCall(method,body,token){const res=await fetch(API,{method,cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});let data;try{data=await res.json()}catch(e){throw new Error('The shared service returned an invalid response. Please try again.')}if(!res.ok)throw Object.assign(new Error(data.error||'The shared service could not complete the request.'),{status:res.status,code:data.code});return data}
+async function checkSharedStorage(){const status=$('#connection-status');try{const result=await apiCall('GET');status.textContent=result.initialized?'Shared accounts are connected. Sign in from any browser using this same website.':getUsers()||readCache('luwas_enc')||readCache(KEY)?'Existing data found in this browser. Sign in as Administrator here once to connect your accounts and records for all browsers.':'Accounts have not been connected yet. Sign in as Administrator in the browser where you created your users first.';status.parentElement?.setAttribute('data-failed','false')}catch(e){status.textContent='Cannot reach shared storage. Check your internet connection and try again. Accounts and changes need a confirmed shared save.';status.parentElement?.setAttribute('data-failed','true')}}
 const profileSnapshot=()=>db.team.map(m=>({id:m.id,u:m.u,role:m.role,active:!!m.active,legacyReadOnly:!!m.legacyReadOnly}));
 function writeBundle(users,enc,profiles,token,revision){return apiCall('PUT',{users,enc,profiles,revision},token)}
 function syncStatus(text,failed=false){const e=$('#sync-status');if(e){e.textContent=text;e.style.color=failed?'var(--red)':''}}
@@ -223,11 +226,11 @@ const snapshot=JSON.stringify(db),users=getUsers(),profiles=profileSnapshot(),ke
 syncStatus('Saving to shared storage…');
 const task=saveQueue.then(async()=>{try{
 if(SAVE_ERROR)return false;
-if(!LOCAL_ONLY&&!token&&!initializing)throw new Error('Please sign in again before saving.');
+if(!token&&!initializing)throw new Error('Please sign in again before saving.');
 const iv=crypto.getRandomValues(new Uint8Array(12)),ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,TE.encode(snapshot)));
 const out=new Uint8Array(12+ct.length);out.set(iv);out.set(ct,12);let s='';for(let i=0;i<out.length;i+=8192)s+=String.fromCharCode(...out.subarray(i,i+8192));const enc=btoa(s);
 if(token){const result=await writeBundle(users,enc,profiles,token,REMOTE_REVISION);if(!result.saved||!Number.isInteger(result.revision))throw new Error('The server did not confirm this save.');REMOTE_REVISION=result.revision;REMOTE_PROFILES=profiles}
-writeCache('luwas_enc',enc);lastSave=new Date();syncStatus(LOCAL_ONLY?'Saved in this browser only':initializing?'Connecting shared storage…':'Saved for all browsers');return true;
+writeCache('luwas_enc',enc);lastSave=new Date();syncStatus(initializing?'Connecting shared storage…':'Saved for all browsers');return true;
 }catch(e){SAVE_ERROR=e;syncStatus('Not saved — sign in again before retrying',true);alert('Your changes were not saved to the shared system. Sign in again and retry the change. '+e.message);return false}});
 const complete=task.finally(()=>{PENDING_SAVES--});saveQueue=complete.then(()=>{});return complete}
 addEventListener('beforeunload',e=>{if(PENDING_SAVES||ACCOUNT_BUSY){e.preventDefault();e.returnValue=''}});
@@ -280,8 +283,6 @@ async function doLogin(e){e.preventDefault();const msg=$('#lmsg');let lock=0;try
 if(Date.now()<lock){msg.textContent='Too many attempts. Try again in '+Math.ceil((lock-Date.now())/1000)+' seconds.';return}
 const f=e.target,uname=f.u.value.trim(),pw=f.p.value;f.p.value='';const submit=f.querySelector('button.btn');if(submit.disabled)return;submit.disabled=true;msg.textContent='Signing in…';SAVE_ERROR=null;let r='bad',loginError='';
 try{
-if(LOCAL_ONLY){r=getUsers()?await newLogin(uname,pw):((await legacyLogin(uname,pw))?'ok':'bad')}
-else{
 let remote;try{remote=await apiCall('POST',{action:'login',username:uname,password:pw})}catch(x){if(x.status===401){r='bad'}else throw x}
 if(remote&&remote.initialized){AUTH_TOKEN=remote.token;REMOTE_PROFILES=remote.profiles;REMOTE_REVISION=remote.revision;putUsers(remote.users);writeCache('luwas_enc',remote.enc);r=await newLogin(uname,pw)}
 else if(remote&&!remote.initialized){const hasLocalAccount=!!getUsers(),hasLocalData=!!(readCache('luwas_enc')||readCache(KEY));
@@ -290,8 +291,8 @@ else r=hasLocalAccount?await newLogin(uname,pw):((await legacyLogin(uname,pw))?'
 if(r==='ok'){if(!await save({initializing:true}))throw new Error('Could not prepare the account data.');const initBody={action:'initialize',username:uname,password:pw,users:getUsers(),enc:readCache('luwas_enc')};let initialized;
 try{initialized=await apiCall('POST',initBody)}catch(x){if(x.code!=='setup-key-required')throw x;const setupKey=prompt('To initialize shared storage, set LUWAS_SETUP_KEY in the Netlify site environment and enter the same value here. Use a long, unique secret.');if(!setupKey){r='setup-required'}else initialized=await apiCall('POST',{...initBody,setupKey})}
 if(initialized){AUTH_TOKEN=initialized.token;REMOTE_PROFILES=initialized.profiles;REMOTE_REVISION=initialized.revision}}}
-}
 }catch(x){loginError=x.message;r=x.status===401?'bad':x.code==='setup-key-required'?'setup-required':x.status===403?'admin-required':'err'}finally{submit.disabled=false}
+if(r!=='ok'){db=null;CK=null;ME=null;AUTH_TOKEN=null;REMOTE_PROFILES=null;REMOTE_REVISION=null}
 if(r==='off'){msg.textContent='This account is disabled. Please contact your administrator.';return}
 if(r==='cancelled'){msg.textContent='Sign in on the browser that contains your existing company data to migrate it.';return}
 if(r==='setup-required'){msg.textContent='Shared storage was not initialized. Configure the Netlify setup key, then try again.';return}
@@ -299,7 +300,7 @@ if(r==='admin-required'){msg.textContent='Only an Administrator can connect this
 if(r==='data'||r==='err'){msg.textContent='Shared sign-in failed. Confirm the site is deployed with Netlify Functions and try again. '+(r==='err'?' ('+loginError+')':'');return}
 if(r!=='ok'){let n=+readCache('luwas_n',true)||0;n++;writeCache('luwas_n',n,true);if(n>=5){try{writeCache('luwas_lock',Date.now()+60000)}catch(x){}writeCache('luwas_n',0,true);msg.textContent='Too many attempts. Locked for 60 seconds.'}else msg.textContent='Incorrect username or password.';return}
 writeCache('luwas_n',0,true);try{removeCache(KEY)}catch(x){}
-logA('Signed in','Account','',ME.name+' ('+ROLES[ME.role]+')');syncStatus(LOCAL_ONLY?'Local file: accounts are available only in this browser':'Connected to shared storage');
+logA('Signed in','Account','',ME.name+' ('+ROLES[ME.role]+')');syncStatus('Connected to shared storage');
 document.body.className='app role-'+ME.role;msg.textContent='';if(!tabsFor().includes(tab))tab='Dashboard';render();idle();if(ME.mc)chPw(1)}
 async function logout(auto){await saveQueue;if(AUTH_TOKEN){try{await apiCall('DELETE',null,AUTH_TOKEN)}catch(e){}}AUTH_TOKEN=null;location.reload()}
 /* ---------- password change ---------- */
@@ -343,7 +344,7 @@ if(pw.length<8){alert('The temporary password must be at least 8 characters.');r
 const us=getUsers();if(us.users.some(x=>x.u===u)){alert('That username is already taken.');return}
 if(!await accountChange(async()=>{const current=getUsers();if(current.users.some(x=>x.u===u))throw new Error('That username is already taken.');const salt=newSalt(),wk=await wrapDK(await kekFor(u,pw,salt)),uid=crypto.randomUUID();
 current.users.push({id:uid,u,salt,wk});putUsers(current);db.team.push({id:uid,u,name:nm,role,active:true,last:0,mc:true});logA('Created user','User',u,nm+' · '+ROLES[role])},e.target))return;
-render();toast(LOCAL_ONLY?'✓ User created in this browser only.':'✓ User saved. They can sign in on this link in any browser.')}
+render();toast('✓ User saved. They can sign in on the shared website in any browser.')}
 function userForm(uid){if(!guard('users'))return;const m=db.team.find(x=>x.id===uid);$('#emodal').innerHTML=`<div class="box"><h3 style="margin:0 0 12px;color:var(--navy);font-size:20px">Edit user</h3><form onsubmit="userSave(event,'${uid}')"><label>Full name<input name="fn" value="${esc(m.name)}" required></label><label>Username<input value="${esc(m.u)}" disabled></label><label>Role<select name="role">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${m.role===k?'selected':''}>${v}</option>`).join('')}</select></label><button class="btn ok">💾 Save changes</button><button type="button" class="btn ghost" onclick="closeEdit()">Cancel</button></form></div>`;$('#emodal').style.display='grid'}
 async function userSave(e,uid){e.preventDefault();if(!guard('users'))return;const fd=new FormData(e.target),m=db.team.find(x=>x.id===uid),role=fd.get('role'),ownRoleChanged=uid===ME.id&&role!==ME.role;
 if(m.role==='admin'&&role!=='admin'&&adminsLeft(uid)===0){alert('There must be at least one active Administrator.');return}
@@ -567,7 +568,7 @@ ${revBox(r)}<div class="grid two mt"><div class="card"><h3>Collection by directi
 let lastSave=null,tt;
 function toast(m){const e=$('#toast');if(!e)return;e.textContent=m;e.style.opacity=1;clearTimeout(tt);tt=setTimeout(()=>{e.style.opacity=0},2400)}
 const stamp=()=>SAVE_ERROR?'Not saved — sign in again':lastSave?'Saved '+lastSave.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'All changes save automatically';
-async function remSave(){if(!await save())return;toast(LOCAL_ONLY?'✓ Saved in this browser only':'✓ Saved for all browsers');render()}
+async function remSave(){if(!await save())return;toast('✓ Saved for all browsers');render()}
 function dl(name,mime,data){logA('Exported','File',name,'');save();const a=document.createElement('a'),u=URL.createObjectURL(new Blob([data],{type:mime}));a.href=u;a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{a.remove();URL.revokeObjectURL(u)},500);toast('⬇ '+name)}
 const safeName=s=>String(s||'file').replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'_')||'file';
 const HW=[].concat([278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278],Array(10).fill(556),[278,278,584,584,584,556,1015],[667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611],[278,278,278,469,556,333],[556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500],[334,260,334,584]);
@@ -814,6 +815,7 @@ const nt={id:id(db.trips),tid:nextTid(),files,date:f.date,time:f.time,bus:f.bus,
 async function addFin(e){e.preventDefault();if(!guard('add'))return;const fd=new FormData(e.target),r=await readImg(fd.get('receipt'));
 const o={id:id(db.fin),date:fd.get('date'),type:fd.get('type'),cat:fd.get('cat'),desc:fd.get('desc'),amt:+fd.get('amt'),receipt:r||''};db.fin.push(o);logA('Created','Finance entry',lab('fin',o),o.type==='Income'?'Income':'Expenses');save();render()}
 function render(){if(!ME)return;if(!tabsFor().includes(tab))tab='Dashboard';nav();$('#app').innerHTML=views[tab]();gate()}
+const CONNECTION_READY=checkSharedStorage();
 </script>
 </body>
 </html>

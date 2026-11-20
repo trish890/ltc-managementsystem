@@ -48,8 +48,8 @@ async function fixture() {
   return { repository, secret, handler: createSharedStoreHandler(repository) };
 }
 
-function browser(handler, { blockedStorage = false, failSaves = false } = {}) {
-  const notices = [], successes = [], elements = new Map(), local = new Map();
+function browser(handler, { blockedStorage = false, failSaves = false, offline = false, protocol = 'https:', localEntries = [], setupKey = null } = {}) {
+  const notices = [], successes = [], elements = new Map(), local = new Map(localEntries), requests = [];
   const storage = {
     getItem(key) { if (blockedStorage) throw Error('Storage unavailable'); return local.get(key) ?? null; },
     setItem(key, value) { if (blockedStorage) throw Error('Storage unavailable'); local.set(key, value); },
@@ -63,18 +63,23 @@ function browser(handler, { blockedStorage = false, failSaves = false } = {}) {
     crypto: globalThis.crypto, TextEncoder, TextDecoder, Uint8Array, btoa, atob,
     window: { localStorage: storage, sessionStorage: storage },
     document: { querySelector: element, body: { className: 'locked' } },
-    location: { protocol: 'https:', reload() {} },
+    location: { protocol, reload() {} },
     addEventListener() {}, setTimeout() {}, clearTimeout() {},
-    alert: message => notices.push(message), confirm: () => true,
+    alert: message => notices.push(message), confirm: () => true, prompt: () => setupKey,
     FormData: class { constructor(form) { this.values = form.values; } get(key) { return this.values[key]; } },
-    fetch: async (url, options) => failSaves && options.method === 'PUT'
-      ? Response.json({ error: 'Service unavailable' }, { status: 503 })
-      : handler(new Request(`https://example.netlify.app${url}`, options)),
+    fetch: async (url, options) => {
+      requests.push({ url, method: options.method });
+      if (offline) throw new Error('Network unavailable');
+      if (failSaves && options.method === 'PUT') return Response.json({ error: 'Service unavailable' }, { status: 503 });
+      const headers = new Headers(options.headers);
+      if (protocol === 'file:') headers.set('Origin', 'null');
+      return handler(new Request(new URL(url, 'https://example.netlify.app'), { ...options, headers }));
+    },
     onToast: message => successes.push(message),
   });
   vm.runInContext(script + `
     render=()=>{};idle=()=>{};chPw=()=>{};toast=onToast;
-    globalThis.app={doLogin,userAdd,doChPw,userPwSave,userToggle,userDel,save,
+    globalThis.app={doLogin,userAdd,doChPw,userPwSave,userToggle,userDel,save,ready:CONNECTION_READY,
       get state(){return {db,ME,users:getUsers(),token:AUTH_TOKEN,revision:REMOTE_REVISION,error:SAVE_ERROR?.message}},
       async login(username,password){const button={disabled:false};await doLogin({preventDefault(){},target:{u:{value:username},p:{value:password},querySelector:()=>button}})},
       async add(username,password){await userAdd({preventDefault(){},target:{values:{u:username,pw:password,fn:username,role:'finance'},querySelectorAll:()=>[]}})},
@@ -82,8 +87,112 @@ function browser(handler, { blockedStorage = false, failSaves = false } = {}) {
       async resetPassword(id,password){await userPwSave({preventDefault(){},target:{values:{pw:password},querySelectorAll:()=>[]}},id)},
       async snapshot(){return {users:getUsers(),enc:readCache('luwas_enc'),profiles:profileSnapshot(),revision:REMOTE_REVISION}}
     };`, context);
-  return { app: context.app, notices, successes, local, elements };
+  return { app: context.app, notices, successes, local, elements, requests };
 }
+
+test('connection status reports readiness without exposing accounts or encrypted records', async () => {
+  const repository = new TestRepository(), handler = createSharedStoreHandler(repository);
+  const request = () => new Request('https://example.netlify.app/api/shared-store');
+  const empty = await handler(request());
+  assert.deepEqual(await empty.json(), { initialized: false });
+  assert.equal(empty.headers.get('Cache-Control'), 'no-store');
+  const f = await fixture();
+  const connected = await f.handler(request());
+  assert.deepEqual(await connected.json(), { initialized: true });
+  const fresh = browser(handler);
+  await fresh.app.ready;
+  assert.match(fresh.elements.get('#connection-status').textContent, /browser where you created your users/);
+});
+
+test('downloaded files can authenticate and save through CORS, without granting access to other websites', async () => {
+  const f = await fixture();
+  for (const origin of ['null', 'https://unrelated.example']) {
+    const response = await f.handler(new Request('https://example.netlify.app/api/shared-store', {
+      method: 'OPTIONS', headers: { Origin: origin, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'Content-Type, Authorization' },
+    }));
+    assert.equal(response.status, 204);
+    assert.equal(response.headers.get('Access-Control-Allow-Origin'), origin === 'null' ? 'null' : null);
+    if (origin === 'null') {
+      assert.match(response.headers.get('Access-Control-Allow-Methods'), /POST, PUT, DELETE/);
+      assert.match(response.headers.get('Access-Control-Allow-Headers'), /Authorization/);
+    }
+  }
+  const actual = await f.handler(new Request('https://example.netlify.app/api/shared-store', { headers: { Origin: 'null' } }));
+  assert.equal(actual.headers.get('Access-Control-Allow-Origin'), 'null');
+  assert.equal(actual.headers.get('Vary'), 'Origin');
+  const file = browser(f.handler, { protocol: 'file:' }), temporary = password();
+  await file.app.login('administrator', f.secret);
+  await file.app.add('file.employee', temporary);
+  assert.equal(file.notices.length, 0);
+  assert.ok(file.requests.every(request => request.url === 'https://ltc-managementsystem-7hu3.netlify.app/api/shared-store'));
+  const fresh = browser(createSharedStoreHandler(f.repository), { blockedStorage: true });
+  await fresh.app.login('file.employee', temporary);
+  assert.equal(fresh.app.state.ME?.u, 'file.employee');
+});
+
+test('first administrator connection transfers existing browser accounts and company records', async t => {
+  const f = await fixture(), original = browser(f.handler), temporary = password();
+  await original.app.login('administrator', f.secret);
+  await original.app.add('existing.employee', temporary);
+  original.app.state.db.co.name = 'Existing company records';
+  original.app.state.db.fin.push({ id: 1, desc: 'Existing expense', amt: 1842.75 });
+  assert.equal(await original.app.save(), true);
+  const snapshot = await original.app.snapshot();
+  const repository = new TestRepository(), handler = createSharedStoreHandler(repository);
+  const previousSetupKey = process.env.LUWAS_SETUP_KEY, setupKey = password();
+  process.env.LUWAS_SETUP_KEY = setupKey;
+  t.after(() => {
+    if (previousSetupKey === undefined) delete process.env.LUWAS_SETUP_KEY;
+    else process.env.LUWAS_SETUP_KEY = previousSetupKey;
+  });
+  const file = browser(handler, { protocol: 'file:', setupKey, localEntries: [
+    ['luwas_users', JSON.stringify(snapshot.users)], ['luwas_enc', snapshot.enc],
+  ] });
+  await file.app.ready;
+  assert.match(file.elements.get('#connection-status').textContent, /Existing data found/);
+  await file.app.login('administrator', f.secret);
+  assert.equal(file.notices.length, 0);
+  assert.ok(file.app.state.token);
+  assert.equal(file.app.state.revision, 1);
+  const fresh = browser(createSharedStoreHandler(repository), { blockedStorage: true });
+  await fresh.app.login('existing.employee', temporary);
+  assert.equal(fresh.app.state.ME?.u, 'existing.employee');
+  assert.equal(fresh.app.state.db.co.name, 'Existing company records');
+  assert.equal(fresh.app.state.db.fin[0].desc, 'Existing expense');
+});
+
+test('offline downloaded files cannot fall back to a browser-only login or create unsynced users', async () => {
+  const f = await fixture(), original = browser(f.handler);
+  await original.app.login('administrator', f.secret);
+  const snapshot = await original.app.snapshot();
+  const offline = browser(f.handler, { protocol: 'file:', offline: true, localEntries: [
+    ['luwas_users', JSON.stringify(snapshot.users)], ['luwas_enc', snapshot.enc],
+  ] });
+  await offline.app.ready;
+  assert.match(offline.elements.get('#connection-status').textContent, /Cannot reach shared storage/);
+  await offline.app.login('administrator', f.secret);
+  assert.equal(offline.app.state.ME, null);
+  assert.equal(offline.app.state.token, null);
+  assert.equal(offline.successes.length, 0);
+  assert.match(offline.elements.get('#lmsg').textContent, /Shared sign-in failed/);
+});
+
+test('an incomplete first connection preserves the local copy without leaving a signed-in account', async () => {
+  const f = await fixture(), original = browser(f.handler);
+  await original.app.login('administrator', f.secret);
+  const snapshot = await original.app.snapshot();
+  const repository = new TestRepository();
+  const file = browser(createSharedStoreHandler(repository), { protocol: 'file:', localEntries: [
+    ['luwas_users', JSON.stringify(snapshot.users)], ['luwas_enc', snapshot.enc],
+  ] });
+  await file.app.login('administrator', f.secret);
+  assert.equal(file.app.state.ME, null);
+  assert.equal(file.app.state.token, null);
+  assert.equal(await repository.get('shared-bundle'), null);
+  assert.ok(file.local.get('luwas_users'));
+  assert.ok(file.local.get('luwas_enc'));
+  assert.match(file.elements.get('#lmsg').textContent, /not initialized/);
+});
 
 test('created account logs in from independent browser caches and survives a backend restart', async () => {
   const f = await fixture(), admin = browser(f.handler), temporary = password();
