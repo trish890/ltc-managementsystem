@@ -334,12 +334,16 @@ export function createSharedStoreHandler(store) {
     return reply({ saved: true, revision });
   }
 
-  return async function handler(request) {
+  async function handleRequest(request) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
     }
 
     try {
+      if (request.method === "GET") {
+        const bundle = await store.get(bundleKey, { type: "json" });
+        return reply({ initialized: !!bundle });
+      }
       if (request.method === "POST") {
         const body = await readBody(request);
         if (body.action === "login") return await signIn(request, body);
@@ -359,6 +363,21 @@ export function createSharedStoreHandler(store) {
       console.error("Shared-store request failed.");
       return reply({ error: "The shared storage service encountered an error." }, 500);
     }
+  }
+
+  return async function handler(request) {
+    const response = await handleRequest(request);
+    response.headers.set("Vary", "Origin");
+    // Downloaded copies use the same authenticated service as the hosted app.
+    // File pages send a null origin; other websites receive no CORS permission.
+    if (request.headers.get("origin") === "null") {
+      response.headers.set("Access-Control-Allow-Origin", "null");
+      if (request.method === "OPTIONS") {
+        response.headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
+        response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      }
+    }
+    return response;
   };
 }
 
