@@ -155,11 +155,12 @@ main,nav,header{position:relative;z-index:1}
 <div id="emodal" onclick="if(event.target===this)closeEdit()"></div>
 <input type="file" id="rimp" accept=".csv,text/csv" hidden onchange="importRem(this)">
 <input type="file" id="fup" accept="image/*" hidden onchange="uploaded(this)">
+<p id="sync-status" role="status" aria-live="polite" style="text-align:center;color:var(--mute);font-size:12px"></p>
 <footer>LTFRB 24/7 Hotline: 1342 · 0917-550-1342 / 0998-550-1342 · Shared, encrypted company data</footer>
 <section id="login"><div class="art" role="img" aria-label="Luwas Transport Corp bus"></div>
-<div class="lcard"><h2>Sign in</h2><p>Authorized personnel only. Your records are encrypted and securely shared with your team.</p>
-<form onsubmit="doLogin(event)" autocomplete="off"><label>Username<input name="u" required autocomplete="off"></label>
-<label>Password<span class="pw"><input name="p" type="password" required autocomplete="off"><button type="button" class="eye" aria-label="Show password" aria-pressed="false" onclick="togglePw(this)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/><path class="slash" d="M3 3l18 18" style="display:none"/></svg></button></span></label><button class="btn">Sign in</button></form><div id="lmsg" role="alert"></div><p style="color:#667090;font-size:12px;margin:12px 0 0">Forgot your password? Ask your administrator to reset it.</p></div></section>
+<div class="lcard"><h2>Sign in</h2><p>Use the same username and password on this Netlify link in Edge, Chrome, Brave or Firefox.</p>
+<form onsubmit="doLogin(event)" autocomplete="on"><label>Username<input name="u" required autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+<label>Password<span class="pw"><input name="p" type="password" required autocomplete="current-password"><button type="button" class="eye" aria-label="Show password" aria-pressed="false" onclick="togglePw(this)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/><path class="slash" d="M3 3l18 18" style="display:none"/></svg></button></span></label><button class="btn">Sign in</button></form><div id="lmsg" role="alert"></div><p style="color:#667090;font-size:12px;margin:12px 0 0">Forgot your password? Ask your administrator to reset it.</p></div></section>
 <script>
 const KEY='luwas_v1';
 /* ---------- demo data ---------- */
@@ -201,14 +202,45 @@ function migrate(d){d=d||{};d.audit=d.audit||[];d.team=d.team||[];d.team.forEach
 d.trips.forEach((t,i)=>{if(!t.tid)t.tid='TRP-'+String(i+1).padStart(4,'0');t.time=t.time||'';t.files=t.files||[];t.driver=t.driver||'';t.status=t.status||'Completed';t.other=(+t.other||0)+(+t.toll||0);delete t.toll;t.dir=t.dir||'';['fuel','crew','other'].forEach(k=>t[k]=+t[k]||0)});
 d.fin.forEach(f=>{if(f.cat==='Tolls & Terminal')f.cat='Terminal Fees'});d.buses.forEach(b=>{b.reg=b.reg||'';b.next=b.next||''});d.drivers.forEach(x=>x.licExp=x.licExp||'');return d}
 /* ---------- security / storage ---------- */
-let db=null,CK=null,AUTH_TOKEN=null,REMOTE_PROFILES=null,REMOTE_REVISION=null,saveQueue=Promise.resolve();const API='/api/shared-store',LOCAL_ONLY=location.protocol==='file:';const VER="e05f87b8ef2ef132283d94338331352fa5b8cb0402e00b865caceccf88fefbc8";const TE=new TextEncoder();
+let db=null,CK=null,AUTH_TOKEN=null,REMOTE_PROFILES=null,REMOTE_REVISION=null,saveQueue=Promise.resolve(),SAVE_ERROR=null,ACCOUNT_BUSY=false,PENDING_SAVES=0;
+const API='/api/shared-store',LOCAL_ONLY=location.protocol==='file:';
+const VER="e05f87b8ef2ef132283d94338331352fa5b8cb0402e00b865caceccf88fefbc8";const TE=new TextEncoder();
+// Browser storage is an optional cache. The shared service remains authoritative.
+const browserCache=new Map();
+function readCache(key,session=false){const k=(session?'session:':'local:')+key;if(browserCache.has(k))return browserCache.get(k);try{return(session?window.sessionStorage:window.localStorage).getItem(key)}catch(e){return null}}
+function writeCache(key,value,session=false){value=String(value);browserCache.set((session?'session:':'local:')+key,value);try{(session?window.sessionStorage:window.localStorage).setItem(key,value)}catch(e){}}
+function removeCache(key){browserCache.delete('local:'+key);try{window.localStorage.removeItem(key)}catch(e){}}
 const b64=a=>btoa(String.fromCharCode(...a)),unb=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
-async function apiCall(method,body,token){const res=await fetch(API,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});let data={};try{data=await res.json()}catch(e){}if(!res.ok)throw Object.assign(new Error(data.error||'The shared service could not complete the request.'),{status:res.status,code:data.code});return data}
+async function apiCall(method,body,token){const res=await fetch(API,{method,cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});let data;try{data=await res.json()}catch(e){throw new Error('The shared service returned an invalid response. Please try again.')}if(!res.ok)throw Object.assign(new Error(data.error||'The shared service could not complete the request.'),{status:res.status,code:data.code});return data}
 const profileSnapshot=()=>db.team.map(m=>({id:m.id,u:m.u,role:m.role,active:!!m.active,legacyReadOnly:!!m.legacyReadOnly}));
 function writeBundle(users,enc,profiles,token,revision){return apiCall('PUT',{users,enc,profiles,revision},token)}
-async function save(){if(!CK)return;lastSave=new Date();try{const iv=crypto.getRandomValues(new Uint8Array(12));const ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},CK,TE.encode(JSON.stringify(db))));
-const out=new Uint8Array(12+ct.length);out.set(iv);out.set(ct,12);let s='';for(let i=0;i<out.length;i+=8192)s+=String.fromCharCode(...out.subarray(i,i+8192));const enc=btoa(s);localStorage.setItem('luwas_enc',enc);
-if(AUTH_TOKEN){const users=getUsers(),profiles=profileSnapshot();saveQueue=saveQueue.then(async()=>{const result=await writeBundle(users,enc,profiles,AUTH_TOKEN,REMOTE_REVISION);REMOTE_REVISION=result.revision});try{await saveQueue}catch(e){saveQueue=Promise.resolve();alert('Your changes are saved in this browser but could not be shared. Another team member may have updated the data; reload the page to get the latest shared version. '+e.message)}}}catch(e){alert('Could not save. Storage may be full: delete old receipts or use smaller images. '+e.message)}}
+function syncStatus(text,failed=false){const e=$('#sync-status');if(e){e.textContent=text;e.style.color=failed?'var(--red)':''}}
+function save({initializing=false}={}){
+if(!CK)return Promise.resolve(false);
+if(SAVE_ERROR){syncStatus('Not saved — sign in again before retrying',true);return Promise.resolve(false)}
+PENDING_SAVES++;
+const snapshot=JSON.stringify(db),users=getUsers(),profiles=profileSnapshot(),key=CK,token=AUTH_TOKEN;
+syncStatus('Saving to shared storage…');
+const task=saveQueue.then(async()=>{try{
+if(SAVE_ERROR)return false;
+if(!LOCAL_ONLY&&!token&&!initializing)throw new Error('Please sign in again before saving.');
+const iv=crypto.getRandomValues(new Uint8Array(12)),ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},key,TE.encode(snapshot)));
+const out=new Uint8Array(12+ct.length);out.set(iv);out.set(ct,12);let s='';for(let i=0;i<out.length;i+=8192)s+=String.fromCharCode(...out.subarray(i,i+8192));const enc=btoa(s);
+if(token){const result=await writeBundle(users,enc,profiles,token,REMOTE_REVISION);if(!result.saved||!Number.isInteger(result.revision))throw new Error('The server did not confirm this save.');REMOTE_REVISION=result.revision;REMOTE_PROFILES=profiles}
+writeCache('luwas_enc',enc);lastSave=new Date();syncStatus(LOCAL_ONLY?'Saved in this browser only':initializing?'Connecting shared storage…':'Saved for all browsers');return true;
+}catch(e){SAVE_ERROR=e;syncStatus('Not saved — sign in again before retrying',true);alert('Your changes were not saved to the shared system. Sign in again and retry the change. '+e.message);return false}});
+const complete=task.finally(()=>{PENDING_SAVES--});saveQueue=complete.then(()=>{});return complete}
+addEventListener('beforeunload',e=>{if(PENDING_SAVES||ACCOUNT_BUSY){e.preventDefault();e.returnValue=''}});
+async function accountChange(change,form){
+if(ACCOUNT_BUSY)return false;
+ACCOUNT_BUSY=true;const buttons=form?Array.from(form.querySelectorAll('button')):[];buttons.forEach(b=>b.disabled=true);
+await saveQueue;
+if(SAVE_ERROR){ACCOUNT_BUSY=false;buttons.forEach(b=>b.disabled=false);alert('Please sign in again before changing accounts. Your previous save did not complete.');return false}
+const previous=JSON.stringify(db),users=getUsers(),me=ME.id;
+try{await change();if(!await save())throw new Error('save-failed');return true}
+catch(e){db=JSON.parse(previous);ME=db.team.find(m=>m.id===me);putUsers(users);document.body.className='app role-'+ME.role;if(e.message!=='save-failed')alert('The account change could not be saved. '+e.message);return false}
+finally{ACCOUNT_BUSY=false;buttons.forEach(b=>b.disabled=false)}
+}
 /* ---------- roles, users, sign-in ---------- */
 let ME=null;
 const ROLES={admin:'Administrator',finance:'Finance',vp_operations:'VP of Operations',executive_assistant:'Executive Assistant'};
@@ -219,8 +251,8 @@ const can=a=>!!(ME&&(PERM[ME.role]||{})[a]&&(!ME.legacyReadOnly||a==='audit'||a=
 const tabsFor=()=>ME?ROLE_TABS[ME.role]||[]:[];
 function guard(a){if(can(a))return true;alert('Your role ('+((ME&&ROLES[ME.role])||'unknown')+') is not allowed to do this.');return false}
 const denied=()=>head('NO ACCESS','Your role does not include this section.',false);
-const getUsers=()=>{try{return JSON.parse(localStorage.getItem('luwas_users'))}catch(e){return null}};
-const putUsers=u=>localStorage.setItem('luwas_users',JSON.stringify(u));
+const getUsers=()=>{try{return JSON.parse(readCache('luwas_users'))}catch(e){return null}};
+const putUsers=u=>writeCache('luwas_users',JSON.stringify(u));
 const newSalt=()=>b64(crypto.getRandomValues(new Uint8Array(16)));
 const stampOf=ms=>ms?new Date(ms).toLocaleString('en-US',{month:'short',day:'2-digit',year:'numeric',hour:'numeric',minute:'2-digit'}):'—';
 const fmtStamp=stampOf;
@@ -228,14 +260,14 @@ const dOf=ms=>{const d=new Date(ms);return d.getFullYear()+'-'+p2(d.getMonth()+1
 async function kekFor(u,pw,salt){const base=await crypto.subtle.importKey('raw',TE.encode(u.toLowerCase()+'\n'+pw),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt:unb(salt),iterations:150000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
 async function wrapDK(kek){const raw=new Uint8Array(await crypto.subtle.exportKey('raw',CK)),iv=crypto.getRandomValues(new Uint8Array(12)),ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv},kek,raw)),o=new Uint8Array(12+ct.length);o.set(iv);o.set(ct,12);return b64(o)}
 async function unwrapDK(kek,wk){const o=unb(wk),raw=await crypto.subtle.decrypt({name:'AES-GCM',iv:o.slice(0,12)},kek,o.slice(12));return crypto.subtle.importKey('raw',raw,{name:'AES-GCM'},true,['encrypt','decrypt'])}
-async function decryptStore(key){const s=localStorage.getItem('luwas_enc');if(!s)return null;const o=unb(s);return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:o.slice(0,12)},key,o.slice(12))))}
+async function decryptStore(key){const s=readCache('luwas_enc');if(!s)return null;const o=unb(s);return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:o.slice(0,12)},key,o.slice(12))))}
 /* first sign-in after upgrade: the original administrator login creates the first account */
 async function legacyLogin(uname,pw){const base=await crypto.subtle.importKey('raw',TE.encode(uname+'\n'+pw),'PBKDF2',false,['deriveBits','deriveKey']);
 const bits=new Uint8Array(await crypto.subtle.deriveBits({name:'PBKDF2',salt:TE.encode('luwas-verify-v1'),iterations:150000,hash:'SHA-256'},base,256));
 if([...bits].map(b=>b.toString(16).padStart(2,'0')).join('')!==VER)return false;
 const old=await crypto.subtle.deriveKey({name:'PBKDF2',salt:TE.encode('luwas-data-v1'),iterations:150000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['decrypt']);
 let data=null;try{data=await decryptStore(old)}catch(e){}
-if(!data){try{data=JSON.parse(localStorage.getItem(KEY))}catch(e){}}
+if(!data){try{data=JSON.parse(readCache(KEY))}catch(e){}}
 CK=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
 db=migrate(data||demo());const salt=newSalt(),kek=await kekFor(uname,pw,salt),uid='u'+Date.now().toString(36);
 db.team=[{id:uid,u:uname.toLowerCase(),name:'Administrator',role:'admin',active:true,last:Date.now(),mc:false}];
@@ -244,32 +276,32 @@ async function newLogin(uname,pw){const us=getUsers(),rec=us&&us.users.find(x=>x
 let key;try{key=await unwrapDK(await kekFor(uname,pw,rec.salt),rec.wk)}catch(e){return'bad'}
 CK=key;let data;try{data=await decryptStore(CK)}catch(e){return'data'}
 db=migrate(data||{});if(REMOTE_PROFILES)db.team.forEach(m=>{const p=REMOTE_PROFILES.find(x=>x.id===m.id);if(p){m.role=p.role;m.active=p.active;m.legacyReadOnly=p.legacyReadOnly}});const m=db.team.find(x=>x.id===rec.id);if(!m)return'bad';if(!m.active){db=null;ME=null;return'off'}m.last=Date.now();ME=m;return'ok'}
-async function doLogin(e){e.preventDefault();const msg=$('#lmsg');let lock=0;try{lock=+localStorage.getItem('luwas_lock')||0}catch(x){}
+async function doLogin(e){e.preventDefault();const msg=$('#lmsg');let lock=0;try{lock=+readCache('luwas_lock')||0}catch(x){}
 if(Date.now()<lock){msg.textContent='Too many attempts. Try again in '+Math.ceil((lock-Date.now())/1000)+' seconds.';return}
-const f=e.target,uname=f.u.value.trim(),pw=f.p.value;f.p.value='';let r='bad',loginError='';
+const f=e.target,uname=f.u.value.trim(),pw=f.p.value;f.p.value='';const submit=f.querySelector('button.btn');if(submit.disabled)return;submit.disabled=true;msg.textContent='Signing in…';SAVE_ERROR=null;let r='bad',loginError='';
 try{
 if(LOCAL_ONLY){r=getUsers()?await newLogin(uname,pw):((await legacyLogin(uname,pw))?'ok':'bad')}
 else{
 let remote;try{remote=await apiCall('POST',{action:'login',username:uname,password:pw})}catch(x){if(x.status===401){r='bad'}else throw x}
-if(remote&&remote.initialized){AUTH_TOKEN=remote.token;REMOTE_PROFILES=remote.profiles;REMOTE_REVISION=remote.revision;putUsers(remote.users);localStorage.setItem('luwas_enc',remote.enc);r=await newLogin(uname,pw)}
-else if(remote&&!remote.initialized){const hasLocalAccount=!!getUsers(),hasLocalData=!!(localStorage.getItem('luwas_enc')||localStorage.getItem(KEY));
+if(remote&&remote.initialized){AUTH_TOKEN=remote.token;REMOTE_PROFILES=remote.profiles;REMOTE_REVISION=remote.revision;putUsers(remote.users);writeCache('luwas_enc',remote.enc);r=await newLogin(uname,pw)}
+else if(remote&&!remote.initialized){const hasLocalAccount=!!getUsers(),hasLocalData=!!(readCache('luwas_enc')||readCache(KEY));
 if(!hasLocalAccount&&!hasLocalData&&!confirm('Shared storage is empty and this browser has no existing account or records. If your company data is in another browser, cancel and sign in there first to migrate it. Continue to initialize a new shared system?'))r='cancelled';
 else r=hasLocalAccount?await newLogin(uname,pw):((await legacyLogin(uname,pw))?'ok':'bad');
-if(r==='ok'){await save();const initBody={action:'initialize',username:uname,password:pw,users:getUsers(),enc:localStorage.getItem('luwas_enc')};let initialized;
+if(r==='ok'){if(!await save({initializing:true}))throw new Error('Could not prepare the account data.');const initBody={action:'initialize',username:uname,password:pw,users:getUsers(),enc:readCache('luwas_enc')};let initialized;
 try{initialized=await apiCall('POST',initBody)}catch(x){if(x.code!=='setup-key-required')throw x;const setupKey=prompt('To initialize shared storage, set LUWAS_SETUP_KEY in the Netlify site environment and enter the same value here. Use a long, unique secret.');if(!setupKey){r='setup-required'}else initialized=await apiCall('POST',{...initBody,setupKey})}
 if(initialized){AUTH_TOKEN=initialized.token;REMOTE_PROFILES=initialized.profiles;REMOTE_REVISION=initialized.revision}}}
 }
-}catch(x){loginError=x.message;r=x.status===401?'bad':x.code==='setup-key-required'?'setup-required':x.status===403?'admin-required':'err'}
+}catch(x){loginError=x.message;r=x.status===401?'bad':x.code==='setup-key-required'?'setup-required':x.status===403?'admin-required':'err'}finally{submit.disabled=false}
 if(r==='off'){msg.textContent='This account is disabled. Please contact your administrator.';return}
 if(r==='cancelled'){msg.textContent='Sign in on the browser that contains your existing company data to migrate it.';return}
 if(r==='setup-required'){msg.textContent='Shared storage was not initialized. Configure the Netlify setup key, then try again.';return}
 if(r==='admin-required'){msg.textContent='Only an Administrator can connect this existing account set to shared storage.';return}
 if(r==='data'||r==='err'){msg.textContent='Shared sign-in failed. Confirm the site is deployed with Netlify Functions and try again. '+(r==='err'?' ('+loginError+')':'');return}
-if(r!=='ok'){let n=+sessionStorage.getItem('luwas_n')||0;n++;sessionStorage.setItem('luwas_n',n);if(n>=5){try{localStorage.setItem('luwas_lock',Date.now()+60000)}catch(x){}sessionStorage.setItem('luwas_n',0);msg.textContent='Too many attempts. Locked for 60 seconds.'}else msg.textContent='Incorrect username or password.';return}
-sessionStorage.setItem('luwas_n',0);try{localStorage.removeItem(KEY)}catch(x){}
-logA('Signed in','Account','',ME.name+' ('+ROLES[ME.role]+')');await save();
+if(r!=='ok'){let n=+readCache('luwas_n',true)||0;n++;writeCache('luwas_n',n,true);if(n>=5){try{writeCache('luwas_lock',Date.now()+60000)}catch(x){}writeCache('luwas_n',0,true);msg.textContent='Too many attempts. Locked for 60 seconds.'}else msg.textContent='Incorrect username or password.';return}
+writeCache('luwas_n',0,true);try{removeCache(KEY)}catch(x){}
+logA('Signed in','Account','',ME.name+' ('+ROLES[ME.role]+')');syncStatus(LOCAL_ONLY?'Local file: accounts are available only in this browser':'Connected to shared storage');
 document.body.className='app role-'+ME.role;msg.textContent='';if(!tabsFor().includes(tab))tab='Dashboard';render();idle();if(ME.mc)chPw(1)}
-async function logout(auto){if(db&&ME){logA(auto?'Session timed out':'Signed out','Account','');try{await save()}catch(e){}}location.reload()}
+async function logout(auto){await saveQueue;if(AUTH_TOKEN){try{await apiCall('DELETE',null,AUTH_TOKEN)}catch(e){}}AUTH_TOKEN=null;location.reload()}
 /* ---------- password change ---------- */
 function chPw(force){const e=$('#emodal');e.innerHTML=`<div class="box"><h3 style="margin:0 0 8px;color:var(--navy);font-size:20px">${force?'Choose your own password':'Change password'}</h3>${force?'<p style="color:var(--mute);margin:0 0 12px">For your security, please replace the temporary password before continuing.</p>':''}<form onsubmit="doChPw(event,${force?1:0})"><label>Current password<input type="password" name="o" required autocomplete="current-password"></label><label>New password (min. 8 characters)<input type="password" name="n" minlength="8" required autocomplete="new-password"></label><label>Confirm new password<input type="password" name="c" minlength="8" required autocomplete="new-password"></label><button class="btn ok">💾 Save password</button>${force?'':'<button type="button" class="btn ghost" onclick="closeEdit()">Cancel</button>'}</form><p id="pwmsg" style="color:var(--red);margin:10px 0 0" role="alert"></p></div>`;e.style.display='grid'}
 async function doChPw(e,force){e.preventDefault();const f=e.target,msg=$('#pwmsg'),rec=getUsers().users.find(x=>x.id===ME.id);
@@ -277,8 +309,9 @@ if(f.n.value!==f.c.value){msg.textContent='The new passwords do not match.';retu
 if(f.n.value.length<8){msg.textContent='The new password must be at least 8 characters.';return}
 if(f.n.value===f.o.value){msg.textContent='Please choose a different password.';return}
 try{await unwrapDK(await kekFor(ME.u,f.o.value,rec.salt),rec.wk)}catch(x){msg.textContent='Your current password is incorrect.';return}
-const salt=newSalt(),wk=await wrapDK(await kekFor(ME.u,f.n.value,salt)),us=getUsers();Object.assign(us.users.find(x=>x.id===ME.id),{salt,wk});putUsers(us);
-ME.mc=false;logA('Changed password','Account','');await save();$('#emodal').style.display='none';toast('✓ Password changed');render()}
+const nextPassword=f.n.value;
+if(!await accountChange(async()=>{const salt=newSalt(),wk=await wrapDK(await kekFor(ME.u,nextPassword,salt)),us=getUsers();Object.assign(us.users.find(x=>x.id===ME.id),{salt,wk});putUsers(us);ME.mc=false;logA('Changed password','Account','')},f))return;
+$('#emodal').style.display='none';toast('✓ Password saved. Use it in any browser.');render()}
 /* ---------- audit trail ---------- */
 const ENT={trips:'Trip',buses:'Bus',drivers:'Driver',fin:'Finance entry',rem:'Remittance',receipts:'Receipt'};
 function lab(k,r){if(!r)return'';return k==='trips'?r.tid:k==='buses'?r.plate:k==='drivers'?r.name:k==='fin'?(r.desc+' '+peso(r.amt)):k==='rem'?r.title:k==='receipts'?r.no:''}
@@ -308,31 +341,34 @@ async function userAdd(e){e.preventDefault();if(!guard('users'))return;const fd=
 if(!/^[a-z0-9._-]{3,24}$/.test(u)){alert('Username must be 3 to 24 characters: letters, numbers, dot, dash or underscore.');return}
 if(pw.length<8){alert('The temporary password must be at least 8 characters.');return}
 const us=getUsers();if(us.users.some(x=>x.u===u)){alert('That username is already taken.');return}
-const salt=newSalt(),wk=await wrapDK(await kekFor(u,pw,salt)),uid='u'+Date.now().toString(36)+Math.random().toString(36).slice(2,5);
-us.users.push({id:uid,u,salt,wk});putUsers(us);db.team.push({id:uid,u,name:nm,role,active:true,last:0,mc:true});logA('Created user','User',u,nm+' · '+ROLES[role]);await save();render();toast('✓ User created. Give them the temporary password.')}
+if(!await accountChange(async()=>{const current=getUsers();if(current.users.some(x=>x.u===u))throw new Error('That username is already taken.');const salt=newSalt(),wk=await wrapDK(await kekFor(u,pw,salt)),uid=crypto.randomUUID();
+current.users.push({id:uid,u,salt,wk});putUsers(current);db.team.push({id:uid,u,name:nm,role,active:true,last:0,mc:true});logA('Created user','User',u,nm+' · '+ROLES[role])},e.target))return;
+render();toast(LOCAL_ONLY?'✓ User created in this browser only.':'✓ User saved. They can sign in on this link in any browser.')}
 function userForm(uid){if(!guard('users'))return;const m=db.team.find(x=>x.id===uid);$('#emodal').innerHTML=`<div class="box"><h3 style="margin:0 0 12px;color:var(--navy);font-size:20px">Edit user</h3><form onsubmit="userSave(event,'${uid}')"><label>Full name<input name="fn" value="${esc(m.name)}" required></label><label>Username<input value="${esc(m.u)}" disabled></label><label>Role<select name="role">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${m.role===k?'selected':''}>${v}</option>`).join('')}</select></label><button class="btn ok">💾 Save changes</button><button type="button" class="btn ghost" onclick="closeEdit()">Cancel</button></form></div>`;$('#emodal').style.display='grid'}
-function userSave(e,uid){e.preventDefault();if(!guard('users'))return;const fd=new FormData(e.target),m=db.team.find(x=>x.id===uid),role=fd.get('role');
+async function userSave(e,uid){e.preventDefault();if(!guard('users'))return;const fd=new FormData(e.target),m=db.team.find(x=>x.id===uid),role=fd.get('role'),ownRoleChanged=uid===ME.id&&role!==ME.role;
 if(m.role==='admin'&&role!=='admin'&&adminsLeft(uid)===0){alert('There must be at least one active Administrator.');return}
-const ch=[];if(m.name!==fd.get('fn'))ch.push('name: '+m.name+' → '+fd.get('fn'));if(m.role!==role)ch.push('role: '+ROLES[m.role]+' → '+ROLES[role]);m.name=String(fd.get('fn')).trim();m.role=role;if(ch.some(x=>x.startsWith('role:')))delete m.legacyReadOnly;
-if(ME.id===uid)document.body.className='app role-'+ME.role;logA('Edited user','User',m.u,ch.join('; '));save();$('#emodal').style.display='none';render();toast('✓ User updated')}
+if(!await accountChange(async()=>{const ch=[];if(m.name!==fd.get('fn'))ch.push('name: '+m.name+' → '+fd.get('fn'));if(m.role!==role)ch.push('role: '+ROLES[m.role]+' → '+ROLES[role]);m.name=String(fd.get('fn')).trim();m.role=role;if(ch.some(x=>x.startsWith('role:')))delete m.legacyReadOnly;
+logA('Edited user','User',m.u,ch.join('; '))},e.target))return;
+if(ownRoleChanged){alert('Your role was updated. Please sign in again.');await logout();return}if(ME.id===uid)document.body.className='app role-'+ME.role;$('#emodal').style.display='none';render();toast('✓ User updated')}
 function userPwForm(uid){if(!guard('users'))return;const m=db.team.find(x=>x.id===uid);$('#emodal').innerHTML=`<div class="box"><h3 style="margin:0 0 8px;color:var(--navy);font-size:20px">Reset password</h3><p style="color:var(--mute);margin:0 0 12px">${esc(m.name)} (${esc(m.u)}) will be asked to choose a new password at the next sign-in.</p><form onsubmit="userPwSave(event,'${uid}')"><label>Temporary password<input name="pw" value="${genPw()}" minlength="8" required></label><button class="btn ok">Reset password</button><button type="button" class="btn ghost" onclick="closeEdit()">Cancel</button></form></div>`;$('#emodal').style.display='grid'}
 async function userPwSave(e,uid){e.preventDefault();if(!guard('users'))return;const pw=String(new FormData(e.target).get('pw')),m=db.team.find(x=>x.id===uid),us=getUsers();if(pw.length<8){alert('At least 8 characters.');return}
-const salt=newSalt(),wk=await wrapDK(await kekFor(m.u,pw,salt));Object.assign(us.users.find(x=>x.id===uid),{salt,wk});putUsers(us);m.mc=true;logA('Reset password','User',m.u,'');await save();$('#emodal').style.display='none';render();toast('✓ Password reset. Give the temporary password to '+m.name+'.')}
-function userToggle(uid){if(!guard('users'))return;const m=db.team.find(x=>x.id===uid);if(m.id===ME.id)return;if(m.active&&m.role==='admin'&&adminsLeft(uid)===0){alert('There must be at least one active Administrator.');return}
-m.active=!m.active;logA(m.active?'Enabled user':'Disabled user','User',m.u,'');save();render()}
-function userDel(uid){if(!guard('users'))return;const m=db.team.find(x=>x.id===uid);if(m.id===ME.id)return;if(m.role==='admin'&&m.active&&adminsLeft(uid)===0){alert('There must be at least one active Administrator.');return}
+if(!await accountChange(async()=>{const salt=newSalt(),wk=await wrapDK(await kekFor(m.u,pw,salt)),current=getUsers();Object.assign(current.users.find(x=>x.id===uid),{salt,wk});putUsers(current);m.mc=true;logA('Reset password','User',m.u,'')},e.target))return;
+$('#emodal').style.display='none';render();toast('✓ Password reset. Give the temporary password to '+m.name+'.')}
+async function userToggle(uid){if(!guard('users'))return;const m=db.team.find(x=>x.id===uid);if(m.id===ME.id)return;if(m.active&&m.role==='admin'&&adminsLeft(uid)===0){alert('There must be at least one active Administrator.');return}
+if(!await accountChange(async()=>{m.active=!m.active;logA(m.active?'Enabled user':'Disabled user','User',m.u,'')}))return;render()}
+async function userDel(uid){if(!guard('users'))return;const m=db.team.find(x=>x.id===uid);if(m.id===ME.id)return;if(m.role==='admin'&&m.active&&adminsLeft(uid)===0){alert('There must be at least one active Administrator.');return}
 if(!confirm('Delete the account of '+m.name+'? They will no longer be able to sign in. Their past activity stays in the audit log.'))return;
-const us=getUsers();us.users=us.users.filter(x=>x.id!==uid);putUsers(us);db.team=db.team.filter(x=>x.id!==uid);logA('Deleted user','User',m.u,m.name);save();render()}
+if(!await accountChange(async()=>{const us=getUsers();us.users=us.users.filter(x=>x.id!==uid);putUsers(us);db.team=db.team.filter(x=>x.id!==uid);logA('Deleted user','User',m.u,m.name)}))return;render()}
 const userRow=m=>{const me=ME.id===m.id;return`<tr><td><b>${esc(m.name)}</b>${me?' <span class="tag">You</span>':''}</td><td>${esc(m.u)}</td><td><span class="tag ${m.role==='admin'?'bad':m.role==='vp_operations'?'sch':'ok'}">${ROLES[m.role]}</span>${m.legacyReadOnly?' <span class="tag">Legacy read-only</span>':''}</td><td><span class="tag ${m.active?'ok':'bad'}">${m.active?'Active':'Disabled'}</span>${m.mc?' <span class="tag sch">Must change password</span>':''}</td><td>${m.last?stampOf(m.last):'Never'}</td><td><button class="btn sm alt" onclick="userForm('${m.id}')">Edit</button> <button class="btn sm ghost" onclick="userPwForm('${m.id}')">Reset password</button>${me?'':` <button class="btn sm ghost" onclick="userToggle('${m.id}')">${m.active?'Disable':'Enable'}</button> <button class="btn sm" onclick="userDel('${m.id}')">Delete</button>`}</td></tr>`};
 /* ---------- settings, backup ---------- */
 function saveCo(e){e.preventDefault();if(!guard('settings'))return;const f=Object.fromEntries(new FormData(e.target));db.co={name:f.name.trim()||'Luwas Transport Corp',tag:f.tag,addr:f.addr,hot:f.hot,tin:f.tin};logA('Edited settings','Company profile','',f.name);save();render();toast('✓ Company profile saved')}
-async function backupNow(){if(!guard('backup'))return;db.meta.lastBackup=Date.now();logA('Backup downloaded','System','','');await save();const enc=localStorage.getItem('luwas_enc'),us=localStorage.getItem('luwas_users');if(!enc||!us){alert('Nothing to back up yet.');return}
+async function backupNow(){if(!guard('backup'))return;db.meta.lastBackup=Date.now();logA('Backup downloaded','System','','');if(!await save())return;const enc=readCache('luwas_enc'),us=readCache('luwas_users');if(!enc||!us){alert('Nothing to back up yet.');return}
 dl('Luwas-Backup-'+today()+'.json','application/json',JSON.stringify({app:'luwas',v:2,at:new Date().toISOString(),users:us,profiles:profileSnapshot(),enc}));render()}
 async function restoreFile(inp){if(!guard('backup'))return;const f=inp.files[0];inp.value='';if(!f)return;let o=null;try{o=JSON.parse(await f.text())}catch(e){}
 if(!o||o.app!=='luwas'||!o.enc||!o.users){alert('This is not a valid Luwas backup file.');return}
 if(!confirm('Restore this backup? It will REPLACE all current data and user accounts shared by this site, and you will be signed out. Download a backup of the current data first if you are unsure.'))return;
-try{if(AUTH_TOKEN){if(!o.profiles){alert('This backup predates shared storage. Sign in from the browser that contains the original data to migrate it, then create a new backup.');return}const result=await writeBundle(JSON.parse(o.users),o.enc,o.profiles,AUTH_TOKEN,REMOTE_REVISION);REMOTE_REVISION=result.revision}localStorage.setItem('luwas_users',o.users);localStorage.setItem('luwas_enc',o.enc);alert('Backup restored. Please sign in again.');location.reload()}catch(e){alert('The backup could not be restored to shared storage. '+e.message)}}
-function monitor(){if(!can('audit'))return'';const a=(db.audit||[]).slice(-8).reverse(),act=db.team.filter(x=>x.active).length,pend=db.rem.filter(r=>revOf(r)==='Pending').length,flag=db.rem.filter(r=>revOf(r)==='Flagged').length,lb=db.meta.lastBackup,old=!lb||Date.now()-lb>7*864e5,used=Math.round(((localStorage.getItem('luwas_enc')||'').length)/1024);
+try{if(AUTH_TOKEN){if(!o.profiles){alert('This backup predates shared storage. Sign in from the browser that contains the original data to migrate it, then create a new backup.');return}const result=await writeBundle(JSON.parse(o.users),o.enc,o.profiles,AUTH_TOKEN,REMOTE_REVISION);REMOTE_REVISION=result.revision}writeCache('luwas_users',o.users);writeCache('luwas_enc',o.enc);alert('Backup restored. Please sign in again.');location.reload()}catch(e){alert('The backup could not be restored to shared storage. '+e.message)}}
+function monitor(){if(!can('audit'))return'';const a=(db.audit||[]).slice(-8).reverse(),act=db.team.filter(x=>x.active).length,pend=db.rem.filter(r=>revOf(r)==='Pending').length,flag=db.rem.filter(r=>revOf(r)==='Flagged').length,lb=db.meta.lastBackup,old=!lb||Date.now()-lb>7*864e5,used=Math.round(((readCache('luwas_enc')||'').length)/1024);
 return`<div class="phead mt"><div><h2 style="font-size:22px">SYSTEM MONITORING</h2><p>Accounts, reviews, backups and the latest activity.</p></div></div><div class="grid kpis">${kpi('','Active users',act+' of '+db.team.length,'Accounts that can sign in')}${kpi('g','Awaiting review',pend,'Remittances not yet verified')}${kpi('r','Flagged',flag,'Remittances with an issue')}${kpi(old?'r':'ok','Last backup',lb?fmtD(dOf(lb)):'Never',old?'A backup is recommended':'Up to date')}${kpi(used>3500?'r':'','Storage used',used+' KB','About 5,000 KB available')}</div>
 <div class="card"><h3>Recent activity</h3>${table(['📅 When','User','Action','Record','Reference'],a.map(x=>`<tr><td>${stampOf(x.t)}</td><td>${esc(x.n||x.u)}</td><td><span class="tag ${actCls(x.a)}">${esc(x.a)}</span></td><td>${esc(x.e)}</td><td>${esc(x.f)}</td></tr>`))}<p class="noprint" style="margin:10px 0 0"><button class="btn sm ghost" onclick="go('Audit Log')">View the full audit log</button></p></div>`}
 function go(t){remOpen=null;rcOpen=null;tab=t;render();scrollTo(0,0)}
@@ -530,8 +566,8 @@ ${revBox(r)}<div class="grid two mt"><div class="card"><h3>Collection by directi
 /* ---------- toast / downloads / PDF writer ---------- */
 let lastSave=null,tt;
 function toast(m){const e=$('#toast');if(!e)return;e.textContent=m;e.style.opacity=1;clearTimeout(tt);tt=setTimeout(()=>{e.style.opacity=0},2400)}
-const stamp=()=>lastSave?'Saved '+lastSave.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'All changes save automatically';
-function remSave(){save();toast('✓ Saved on this device');render()}
+const stamp=()=>SAVE_ERROR?'Not saved — sign in again':lastSave?'Saved '+lastSave.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}):'All changes save automatically';
+async function remSave(){if(!await save())return;toast(LOCAL_ONLY?'✓ Saved in this browser only':'✓ Saved for all browsers');render()}
 function dl(name,mime,data){logA('Exported','File',name,'');save();const a=document.createElement('a'),u=URL.createObjectURL(new Blob([data],{type:mime}));a.href=u;a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{a.remove();URL.revokeObjectURL(u)},500);toast('⬇ '+name)}
 const safeName=s=>String(s||'file').replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'_')||'file';
 const HW=[].concat([278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278],Array(10).fill(556),[278,278,584,584,584,556,1015],[667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611],[278,278,278,469,556,333],[556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500],[334,260,334,584]);
@@ -697,10 +733,10 @@ ${band('ACTIVITY')}<div id="atab">${auditTable()}</div>`},
 Users(){if(!can('users'))return denied();
 return head('USERS & ROLES','Create accounts for your team and control what each person can do.',false)+
 `<div class="card" style="margin-bottom:16px"><h3>Role access</h3>${table(['Role','Access'],[['Administrator','Full control: manage users, all records, audit log, settings and backups.'],['Finance','Manage financial entries, receipts and remittances; view finance reports. No user administration, audit log, or system settings.'],['VP of Operations','Manage operational and financial records, review remittances, and view reports and the audit log. User administration remains restricted to Administrators.'],['Executive Assistant','Create and edit day-to-day trip, receipt, remittance, fleet and finance records. No deletion, audit log, or user administration.']].map(r=>`<tr><td><b>${r[0]}</b></td><td class="wrap">${r[1]}</td></tr>`))}</div>
-<details class="card" style="margin-bottom:16px"><summary>+ Add a user</summary><form onsubmit="userAdd(event)"><label>Full name<input name="fn" required></label><label>Username<input name="u" required placeholder="e.g. maria.santos" autocomplete="off"></label><label>Role<select name="role">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${k==='executive_assistant'?'selected':''}>${v}</option>`).join('')}</select></label><label>Temporary password<input name="pw" value="${genPw()}" minlength="8" required autocomplete="off"></label><button class="btn ok">Create user</button></form><p style="color:var(--mute);font-size:12px;margin:10px 0 0">Give the person their username and temporary password. They will be asked to choose their own password the first time they sign in.</p></details>
+<details class="card" style="margin-bottom:16px"><summary>+ Add a user</summary><form onsubmit="userAdd(event)"><label>Full name<input name="fn" required></label><label>Username<input name="u" required placeholder="e.g. maria.santos" autocomplete="off"></label><label>Role<select name="role">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}" ${k==='executive_assistant'?'selected':''}>${v}</option>`).join('')}</select></label><label>Temporary password<input name="pw" value="${genPw()}" minlength="8" required autocomplete="off"></label><button class="btn ok">Create user</button></form><p style="color:var(--mute);font-size:12px;margin:10px 0 0">After the save is confirmed, give the person this same Netlify link, their username and temporary password. They can sign in using Edge, Chrome, Brave or Firefox and will choose their own password at first sign-in.</p></details>
 ${band('TEAM')}${table(['Name','Username','Role','Status','Last sign-in',''],db.team.map(userRow))}
 <p style="color:var(--mute);font-size:12px;margin-top:10px">Accounts and encrypted records are shared through Netlify storage and are available across browsers on this site.</p>`},
-Settings(){if(!can('settings'))return denied();const co=CO(),lb=db.meta.lastBackup,used=Math.round(((localStorage.getItem('luwas_enc')||'').length)/1024);
+Settings(){if(!can('settings'))return denied();const co=CO(),lb=db.meta.lastBackup,used=Math.round(((readCache('luwas_enc')||'').length)/1024);
 return head('SETTINGS','Company profile, backups and system information.',false)+
 `<div class="grid two"><div class="card"><h3>Company profile<small>used on receipts and PDF reports</small></h3><form onsubmit="saveCo(event)"><label>Company name<input name="name" value="${esc(co.name)}" required></label><label>Tagline<input name="tag" value="${esc(co.tag)}"></label><label>Address<input name="addr" value="${esc(co.addr)}"></label><label>Hotline / contact<input name="hot" value="${esc(co.hot)}"></label><label>TIN / permit no. (optional)<input name="tin" value="${esc(co.tin)}"></label><button class="btn ok">💾 Save profile</button></form></div>
 <div class="card"><h3>Backup &amp; restore</h3><p style="margin:0 0 8px;color:var(--mute)">A backup is an encrypted file with all records and user accounts. Keep copies somewhere safe, and download one regularly.</p><p style="margin:0 0 12px">Last backup: <b>${lb?stampOf(lb):'Never'}</b></p><button class="btn" onclick="backupNow()">⬇ Download backup</button> <button class="btn ghost" onclick="document.getElementById('rstf').click()">⬆ Restore from backup</button><input type="file" id="rstf" accept=".json,application/json" hidden onchange="restoreFile(this)"></div></div>
